@@ -23,7 +23,7 @@ Verified end-to-end on Linux (Debian-family, Docker 29.4.0) on
 - The licensed/Enterprise IRIS path (`autoInstaller.sh -c` + `iris-files/` staging)
 - GT.M / YottaDB
 - RPMS
-- Production multi-user use — Community Edition has a hard ~5-LU
+- Production multi-user use — Community Edition has a hard 8-LU
   concurrency cap (see §9)
 
 For the licensed-kit, YottaDB, GT.M, or RPMS paths, see the upstream
@@ -369,35 +369,66 @@ docker run --rm -v ~/data/foia-iris:/data alpine du -sh /data /data/mgr/VISTA
 
 ## 9. Community Edition license cap (important caveat)
 
-`iris-community` is licensed for ~5 concurrent **logical users (LU)**.
-Once `^ZSTU` runs at boot the slot budget is consumed:
+`iris-community` is licensed for **8 concurrent logical users (LU)**.
+Measured steady-state with all four `^ZSTU`-launched listeners up and
+idle (RPC Broker, Taskman, VistALink, superserver) is **1 LU** — so
+you have ~7 LU of headroom from the listener baseline.
 
-| Consumer                                          | ≈ slots |
-| ------------------------------------------------- | ------- |
-| IRIS internals (System Monitor, WorkQueue daemon) | 1–2     |
-| RPC Broker (`ZISTCP^XWBTCPM1`)                    | 1       |
-| Taskman (`^ZTMB` + spawned `ZTMS*` workers)       | 2+      |
-| VistALink (`START^XOBVLL`)                        | 1       |
+Each new `iris session`, CPRS / RPC client, JDBC connection, etc. takes
+one LU on top of that. Exceedance is realistic during install/debug
+workflows where multiple shells are open at once. Symptoms when the
+cap is hit:
 
-That is at-or-over the cap. Consequences:
-
-- A *new* `iris session` lands `<LICENSE LIMIT EXCEEDED>` and
+- A new `iris session` lands `<LICENSE LIMIT EXCEEDED>` and
   `messages.log` records `License limit exceeded N times since instance start`
 - The image's healthcheck probes IRIS via a session, so `docker ps`
   may show `(unhealthy)` even though the listeners are reachable.
   The four published ports are the source of truth, not the Docker
   health flag.
-- A single CPRS / RPC client from outside *can* connect, but only
-  one or two simultaneously
 - The instance itself is healthy; `iris list` reports `state: warn`,
   not `down`
 
-**Freeing a slot for interactive shell debugging.** From a `%SYS`
-session: `D STOP^%ZTMSH` halts Taskman. Or stop the XWB listener
-job. Restart the container afterward to bring them back.
+**Recovery.** Just close stray `iris session` shells and any unused
+JDBC/ODBC connections. If you need to free more slots, `D STOP^%ZTMSH`
+in `%SYS` halts Taskman; restart the container afterward to bring it
+back.
 
-For sustained multi-user use, switch to a licensed IRIS install
-(not covered by this guide).
+For sustained multi-user use (more than 2-3 concurrent CPRS clients),
+switch to a licensed IRIS install (not covered by this guide).
+
+### Monitoring license use from the host
+
+The Community image exposes a Prometheus-style metrics endpoint on
+the existing 52773 port — unauthenticated by default — that reports
+current LU consumption:
+
+```sh
+curl -s http://localhost:52773/api/monitor/metrics | grep ^iris_license_
+```
+
+Relevant counters:
+
+| Metric                          | Meaning                       |
+| ------------------------------- | ----------------------------- |
+| `iris_license_consumed`         | LUs in use right now          |
+| `iris_license_available`        | LUs free (cap = consumed + available) |
+| `iris_license_percent_used`     | Convenience percentage        |
+| `iris_license_days_remaining`   | Days until license expires    |
+
+This is more useful than tailing `messages.log`, which only logs
+*exceeded* events on a 15-minute cadence and gives no current-load
+signal.
+
+A one-line wrapper is convenient for quick checks; on this host it
+lives at `~/scripts/bin/foia-license`:
+
+```sh
+$ foia-license
+license: 1/8 used (13%) — 7 free, expires in 327 days
+```
+
+For threshold-based alerting, scrape `iris_license_percent_used` from
+the same endpoint with your monitoring tool of choice.
 
 ## 10. Stop and clean up
 
@@ -428,9 +459,13 @@ docker rmi foia
 - **CPRS / VistALink doesn't connect after build** — §5 wasn't run,
   or `^ZSTU` didn't fire on the restart. Check `messages.log` for
   `Executing ^ZSTU routine` near the most recent boot timestamp.
-- **`<LICENSE LIMIT EXCEEDED>` on `iris session`** — see §9. Not a
-  bug; expected once Taskman + listeners are up.
-- **`docker ps` says `(unhealthy)`** — same root cause as above; the
+- **`<LICENSE LIMIT EXCEEDED>` on `iris session`** — see §9. Listener
+  baseline is only ~1/8 LU, so this means several other LU consumers
+  (interactive shells, CPRS/RPC clients, JDBC connections) are open.
+  Run `foia-license` (or `curl /api/monitor/metrics`) to see current
+  consumption, then close stray sessions.
+- **`docker ps` says `(unhealthy)`** — the image's healthcheck runs
+  through `iris session` and so trips when LUs are saturated; the
   external listeners are the source of truth.
 - **First Mgmt Portal login refuses to continue** — change the
   `_SYSTEM` password to something other than `SYS`. Required before
