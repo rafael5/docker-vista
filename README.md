@@ -1,4 +1,6 @@
 # Dockerized VistA/RPMS instances
+
+> ⚠️ **ARCHIVED 2026-07-04** (fork frozen). Local engine/instance provisioning now uses **vista-meta**'s VEHU container + `m engine` (m-test-engine); upstream's prebuilt Docker Hub images are no longer updated. Kept for reference; read-only, no further development.
 Code in this repository enables you to create VistA or RPMS instances on
 IRIS or GT.M/YottaDB.  A working [Docker](https://www.docker.com/community-edition#/download) installation on
 the platform of choice is required in order to be able to create instances.
